@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Tue Aug 26 14:09:59 2025
+Created on Fri Sep  5 10:09:22 2025
 
 @author: petershea
 """
@@ -14,6 +14,8 @@ import numpy as np
 
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse
+from matplotlib.gridspec import GridSpec
+from matplotlib import colors, cm
 
 from astropy.io import fits, ascii
 from astropy.convolution import convolve, Gaussian2DKernel
@@ -94,6 +96,45 @@ class RED:
         self.psf_data_tbl = None
 
 
+
+    def load_fits(self, filename):
+        
+        '''
+        
+        filename: str; absolute path to desired fits image
+        '''
+        
+        # Opens fits file
+        hdul = fits.open(filename)
+        
+        file = filename.strip().split('/')[-1]
+        
+        file_name, extension = os.path.splitext(file)
+        
+        self.fits_name = file_name
+        
+        # Sets header and raw data to be global variables
+        self.header = hdul[0].header
+        self.image = hdul[0].data
+        
+        # Trys to extract time at start of exposure from the fits header
+        try:
+            time = self.header['DATE-OBS']
+        except KeyError:
+            print('DATE-OBS keyword not found')
+        
+        if '_' in time:
+            time = time.replace('_','.')
+            time = datetime.strptime(time, "%Y%m%dT%H%M%S.%f")
+            time = time.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+            time = str(time)
+            
+        # Transforms time from str to astropy time object in jd
+        time = Time(time, format='isot', scale='utc')
+        self.time = time.jd
+
+
+
     def stack(self, subdir, stacked_filename, specific_fits=None, sigma=3):
         '''
         Function to stack images to increase snr.
@@ -101,7 +142,7 @@ class RED:
         Parameters:
             subdir: str; absolute path to directory that contains the raw images which should be stacked
             stacked_filename: str; name of stacked image (does not include extension .fits)
-            specific_fits: ndarray [str]; list of specified fits images to stack if only a subset is desired
+            specific_fits: ndarray [str]; list of specified fits images to stack if only a subset is desired, absolute paths to files
             sigma: float or int; sigma level for mad stats 
             
         returns:
@@ -122,7 +163,7 @@ class RED:
         if not os.path.isdir(self.stacked_path):os.mkdir(self.stacked_path)
         
         # Default; pulls all files from given directory and compiles list of fits images to stack 
-        if specific_fits == None:
+        if specific_fits is None:
             files = sorted(os.listdir(subdir))
             self.fits_imgs = np.array([f for f in files if f.endswith('.FIT') or f.endswith('.fits')])
             
@@ -143,10 +184,10 @@ class RED:
         stacked_image = np.asarray(stacked_image.filled(np.nan)) 
         
         # Variable to store filename
-        stacked_filename = f'{self.stacked_path}/{stacked_filename}_stacked.fits'
+        self.stacked_filename = f'{self.stacked_path}/{stacked_filename}_stacked.fits'
         
         # appends created stacked fits to the global variable to keep track
-        self.stacked_fits = np.append(self.stacked_fits, stacked_filename)
+        self.stacked_fits = np.append(self.stacked_fits, self.stacked_filename)
         
         # Copy header from first exposure 
         with fits.open(f'{subdir}/{self.fits_imgs[0]}') as hdul:
@@ -164,11 +205,11 @@ class RED:
         
         # Saves stacked image
         hdu = fits.PrimaryHDU(stacked_image, header=header)
-        hdu.writeto(stacked_filename, overwrite=True)
+        hdu.writeto(self.stacked_filename, overwrite=True)
        
         
        
-    def detect(self, filename, npixels=10, connectivity=8):
+    def detect(self, npixels=10, connectivity=8):
         '''
         Function that preforms rudimentary background estimation and subtraction, 
         detects sources, preforms deblending, and returns an table of sources with 
@@ -176,7 +217,7 @@ class RED:
         background subtracted image.
         
         Parameters:
-            filename: str; absolute path to desired fits image
+            
             npixels: int; number of connected pixels to qualify as a source (most 
                 used in this fucntion to distinguish between sources and cosmic 
                 rays/hot pixels) *Optional
@@ -193,23 +234,6 @@ class RED:
             semgent_map: 2d ndarray; segment map of deblended sources
             sources_table: astropy table; source data characteristics from phot utils
         '''
-        # Opens fits file
-        hdul = fits.open(filename)
-        
-        # Sets header and raw data to be global variables
-        self.header = hdul[0].header
-        self.image = hdul[0].data
-        
-        # Trys to extract time at start of exposure from the fits header
-        try:
-            time = self.header['DATE-OBS']
-        except KeyError:
-            print('DATE-OBS keyword not found')
-        
-        # Transforms time from str to astropy time object in jd
-        time = Time(time, format='isot', scale='utc')
-        self.time = time.jd
-        
         
         try:    # initial source detection catching images with no source
             with warnings.catch_warnings():
@@ -218,7 +242,7 @@ class RED:
                 segment_img_init = detect_sources(self.image, threshold_init, npixels=npixels)
         
         except NoDetectionsWarning:
-            print(f"\tNo sources detected in {self.filename}")
+            print(f"\tNo sources detected in {self.fits_name}")
             return None
         
         # Initial source mask
@@ -511,7 +535,85 @@ class RED:
     
         plt.show()
     
-    def reduce_one(self, fits_file, visualize=False):
+    
+    
+    def visualize_detected_sources(self):
+        
+        fig, ax = plt.subplots()
+    
+        ax.imshow(self.imgdata, norm=norm, cmap='Greys_r', interpolation='nearest', origin='lower')
+    
+    def phot_reduce_single(self, fits_file, save_bkg_sub):
+        '''
+        WIP FUNCTION: produces psf chaaracteristics for all sources detected in a given fits file
+        
+        Parameters:
+            fits_file: str; absolute path to desired fits image
+            save_bkg_sub: boolean; determines if the background subtracted image 
+                created by detect should be saved or not
+        
+        Returns: 
+            N/A
+        '''
+        # Loads data from the given fits image
+        self.load_fits(fits_file)
+        
+        # Detect sources in the given image 
+        tbl = self.detect()
+        
+        # For each source in the image fit a 2d gaussian
+        for i in range(len(tbl['xcentroid'])):
+            
+            # Defines center estimate of the source to be detected xy coords
+            try:
+                center_est = (tbl['xcentroid'][i].value[0],tbl['ycentroid'][i].value[0])
+                
+            except AttributeError:
+                center_est = (tbl['xcentroid'][i],tbl['ycentroid'][i])
+            
+            # Fits 2d gaussian
+            psf_characteristics = self.fit_2dgauss(center_est)
+        
+        # Saves the psf characteristics of all sources in the image to a data table 
+        self.psf_data_tbl.write(f'{self.red_path}/{self.fits_name}_psf_data.txt', format='ascii.fixed_width', overwrite=True)
+        
+        # Saves the background subtracted image if desired copying the header from the raw fits img
+        if save_bkg_sub is True:
+            
+            header = self.header
+            
+            hdu = fits.PrimaryHDU(self.imgdata, header=header)
+            hdu.writeto(f'{self.red_path}/{self.fits_name}_bkgsub.fits', overwrite=True)
+            
+          
+    
+    def phot_reduce_all(self, fits_files, save_bkg_sub=False):
+        '''
+        WIP FUNCTION: designed to reduce a list of fits files and save psf characteristics for all listed files 
+        
+        Parameters: 
+            fits_files: ndarray [str]; list of absolute paths to all fits files 
+                which should be photometrically reduced  
+            save_bkg_sub: boolean; determines if the background subtracted image 
+                created by detect should be saved or not
+        
+        Returns:
+            N/A
+        '''
+        # Clears PSF data table if another function has been previously called
+        self.psf_data_tbl = None
+        
+        # For each image calls the single image reduction function
+        for fits_file in fits_files:
+            
+            self.phot_reduce_single(fits_file, save_bkg_sub)
+            
+            # Clears global psf data table for next reduced image
+            self.psf_data_tbl = None
+            
+    
+    
+    def focus_reduce_one(self, fits_file, visualize=False):
         '''
         Function which calls other functions in the class to detect sources, 
         estimate center if necessry, and fit 2d gaussian to the source of a single
@@ -525,7 +627,9 @@ class RED:
             N/A
         '''
         # defines source table from detect function
-        tbl = self.detect(fits_file)
+        self.load_fits(fits_file)
+        
+        tbl = self.detect()
         
         # If more than 1 source is found runs avg_source to determine true center
         if len(tbl) > 1:
@@ -539,43 +643,13 @@ class RED:
         # visualizes result of fit 
         if visualize == True:
             self.visualize_2dgauss(psf_characteristics)
-        
-        
-    def reduce_all(self, visualize=False):
-        '''
-        Function for reducing all fits files within a given directory. Data structure
-        should either be all fits files in a single directory which will be reduced 
-        without stacking or many subdirs with fits files which will be stacked according 
-        to subdir they are within. Saves PSF characteristics to txt file for brightest 
-        source.
-        
-        Parameters:
-            visualize: boolean; determines if results from 2d gaussian fitting should be shown
-        
-        Returns:
-            N/A
-        '''
-        # Determines mode: if there are subdirs then stack images within subdirs and reduce stacked images
-        #       otherwise: reduce all fits images within the directory separately (no stacking)
-        if not len(self.subdirs) == 0:
-            for subdir in self.subdirs:
-                self.stack(f'{self.raw_path}/{subdir}',subdir)
-            
-            # Defines global variable fits_imgs to be the stacked fits  for reduction
-            self.fits_imgs = self.stacked_fits
-        
-        # Reduces each fits file in fits_imgs global variable
-        for fits_img in self.fits_imgs:
-            self.reduce_one(fits_img)
-        
-        # Saves psf characteristic table for all reduced images to a txt
-        self.psf_data_tbl.write(f'{self.red_path}/{self.raw_date}_psf_data.txt', format='ascii.fixed_width', overwrite=True)
+     
         
     
-    def focus_sweep(self, focus_arr, visualize=False):
+    def reduce_focus_sweep(self, focus_arr, visualize=False):
         '''
         Function to determine optimal focus point based on minimizing fwhm from
-        focus sweep data set
+        focus sweep data set. Reduces all files in raw_path to do so
         
         Parameters:
             focus_arr: ndarray [µm]; array of focus positions associated with each image
@@ -584,6 +658,47 @@ class RED:
         Returns:
             optimal_focus: float [µm]; the optimal focus location to minimize source fwhm in x and y
         '''
+        
+        # Determines mode: if there are subdirs then stack images within subdirs and reduce stacked images
+        #       otherwise: reduce all fits images within the directory separately (no stacking)
+        if not len(self.subdirs) == 0:
+            stack_path = f'{red_path}/stacked_imgs'
+            if os.path.isdir(stack_path):
+                num_stacked = len(np.array([f for f in sorted(os.listdir(stack_path)) if f.endswith('.FIT') or f.endswith('.fits')]))
+            
+                if num_stacked == len(self.subdirs):
+                    fits_names = np.array([f for f in sorted(os.listdir(stack_path)) if f.endswith('.FIT') or f.endswith('.fits')])
+                
+                    fits_paths = np.array([])
+                    
+                    for i in range(len(fits_names)):
+                        fits_paths = np.append(fits_paths,f'{stack_path}/{fits_names[i]}')
+                    
+                    self.fits_imgs = fits_paths
+                        
+                
+                else:
+                    for subdir in self.subdirs:
+                        self.stack(f'{self.raw_path}/{subdir}',subdir)
+                    
+                    # Defines global variable fits_imgs to be the stacked fits  for reduction
+                    self.fits_imgs = self.stacked_fits
+        
+            else:
+                for subdir in self.subdirs:
+                    self.stack(f'{self.raw_path}/{subdir}',subdir)
+                
+                # Defines global variable fits_imgs to be the stacked fits  for reduction
+                self.fits_imgs = self.stacked_fits
+        
+        # Reduces each fits file in fits_imgs global variable
+        for fits_img in self.fits_imgs:
+            self.focus_reduce_one(fits_img)
+        
+        self.psf_data_tbl.add_column(focus_arr,name='Focus Position')
+        
+        # Saves psf characteristic table for all reduced images to a txt
+        self.psf_data_tbl.write(f'{self.red_path}/{self.raw_date}_focus_data.txt', format='ascii.fixed_width', overwrite=True)
         
         # Function for upper branch of vertical hyperbola
         vertical_hyperbola = lambda x, h, k, a, b: k + np.sqrt(a**2 * (1 + ((x - h)**2) / b**2))
@@ -637,14 +752,252 @@ class RED:
             plt.show()
         
         return f'{focus_cont[optimal_focus]:.2f} [µm]'
+    
+    
+    
+    def reduce_tracking(self, visualize=False, verbose=False):
+        
+        self.psf_data_tbl = None
+        
+        if not os.path.isdir(f'{self.red_path}/stacked_imgs'):
+            
+            onsky_stacked = np.array([])
+            SHWF_stacked = np.array([])
+        
+            # Interates through subdirs within the main raw data directory
+            for subdir in self.subdirs:
+                
+                wkdir = f'{self.raw_path}/{subdir}'
+                
+                all_files = sorted(os.listdir(wkdir))
+                
+                onsky_fits = np.array([f for f in all_files if '.zwo' in f])
+                
+                SHWF_fits = np.array([f for f in all_files if '.zwo' not in f and '.fits' in f])
+                
+                if len(onsky_fits) > 0:
+                    self.stack(wkdir,f'{subdir}_onsky',specific_fits=onsky_fits)
+                    onsky_stacked = np.append(onsky_stacked,self.stacked_filename)
+                    
+                    
+                if len(SHWF_fits) > 0:
+                    self.stack(wkdir,f'{subdir}_SHWF',specific_fits=SHWF_fits)
+                    SHWF_stacked = np.append(SHWF_stacked,self.stacked_filename)
+                    
+        
+        else:
+            
+            all_stacked = sorted(os.listdir(f'{self.red_path}/stacked_imgs'))
+            
+            onsky_stacked = np.array([f for f in all_stacked if 'onsky' in f])
+            onsky_stacked = np.char.add(f'{self.red_path}/stacked_imgs/',onsky_stacked)
+            SHWF_stacked = np.array([f for f in all_stacked if 'SHWF' in f])
+            SHWF_stacked = np.char.add(f'{self.red_path}/stacked_imgs/',SHWF_stacked)
+        
+        ### Shack-Hartman Wavefront
+        
+        
+        
+        ### Onsky tracking 
+        
+        visual = None
+        
+        if not os.path.isfile(f'{red_path}/tracking_psf_data.txt'):
+            
+            for file in onsky_stacked:
+                
+                print(f'Working on {file}')
+                
+                self.load_fits(file)
+                
+                tbl = self.detect()
+                
+                if tbl is None:
+                    
+                    self.psf_data_tbl.add_row([self.time,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,
+                                        np.nan])
+            
+                else:
+                    
+                    if len(tbl) > 1:
+                        center_est = self.avg_source()
+                    else:
+                        center_est = (tbl['xcentroid'].value[0], tbl['ycentroid'].value[0])
+                    
+                    # Fits gaussian
+                    psf_characteristics = self.fit_2dgauss(center_est)
+                    
+                    if visual is None: visual = self.imgdata
+            
+                self.psf_data_tbl.write(f'{red_path}/tracking_psf_data.txt', format='ascii.fixed_width', overwrite=True)      
+        
+        
+        else:
+            self.psf_data_tbl = Table.read(f'{red_path}/tracking_psf_data.txt', format='ascii.fixed_width')
+            
+            self.load_fits(onsky_stacked[0])
+            
+            tbl = self.detect()
+            
+            if visual is None: visual = self.imgdata
+        
+        time = (self.psf_data_tbl['Time'] - self.psf_data_tbl['Time'][0]) * 1440
+        
+        drift_arr = np.array([])
+        xdrift_arr = np.array([])
+        ydrift_arr = np.array([])
+        for i in range(len(self.psf_data_tbl['x_0'])-1):
+            x_drift = (self.psf_data_tbl['x_0'][i+1] - self.psf_data_tbl['x_0'][i])
+            y_drift = (self.psf_data_tbl['y_0'][i+1] - self.psf_data_tbl['y_0'][i])
+            drift = np.sqrt(x_drift**2 + y_drift**2)
+            dt = time[i+1] - time[i]
+            
+            drift_arr = np.append(drift_arr,drift/dt)
+            xdrift_arr = np.append(xdrift_arr,x_drift/dt)
+            ydrift_arr = np.append(ydrift_arr,y_drift/dt)
+            
+        mean_drift = np.mean(drift_arr)
+        mean_x_drift = np.mean(xdrift_arr)
+        mean_y_drift = np.mean(ydrift_arr)
+        
+        drift_resultls = np.array([mean_drift,mean_x_drift,mean_y_drift])
+            
+        if visualize == True:
+            
+            bound = 100
+            
+            fig = plt.figure(figsize=(9,8), layout='constrained', dpi=1000)
+            gs = GridSpec(2, 2, figure=fig)
+            
+            ax0 = fig.add_subplot(gs[0,0])  # Cartesian
+            ax1 = fig.add_subplot(gs[0,1])  # Cartesian
+            ax2 = fig.add_subplot(gs[1,0], projection='polar')  # Polar
+            ax3 = fig.add_subplot(gs[1,1])  # Cartesian
+            
+            # --- Plot 1: Source Drift ---
+            
+            norm = ImageNormalize(stretch=SqrtStretch())
+            
+            norm_time = colors.Normalize(vmin=time.min(), vmax=time.max())
+            cmap_time = plt.colormaps['viridis']
+            
+            ax0.imshow(visual, norm=norm, origin='lower', cmap='Greys_r',
+                       interpolation='nearest')
+            ax0.scatter(self.psf_data_tbl['x_0'],self.psf_data_tbl['y_0'], c=time, cmap='viridis', marker='.')
+            ax0.set_xlim(np.min(self.psf_data_tbl['x_0'])-bound,np.max(self.psf_data_tbl['x_0'])+bound)
+            ax0.set_ylim(np.min(self.psf_data_tbl['y_0'])-bound,np.max(self.psf_data_tbl['y_0'])+bound)
+            ax0.set_aspect('equal', adjustable='box')
+            ax0.set_title('Tracking Drift')
+            
+            sm = cm.ScalarMappable(cmap=cmap_time, norm=norm_time)
+            sm.set_array([])
+            cbar = plt.colorbar(sm, ax=ax0)
+            cbar.set_label("Time from Initial Observation [min]")
+            
+            # --- Plot 2: FWHM over time ---
+            
+            x_mask = self.psf_data_tbl['FWHM_x'] >= 1
+            y_mask = self.psf_data_tbl['FWHM_y'] >= 1
+            tot_mask = x_mask & y_mask
+            
+            fwhm_x = self.psf_data_tbl['FWHM_x'][tot_mask]
+            fwhm_y = self.psf_data_tbl['FWHM_y'][tot_mask]
+            #masked_ecen = tbl['Eccentricity'][tot_mask]
+            masked_time = time[tot_mask]
+            
+            linear = lambda x, m, b: m*x + b
+            
+            x_popt, x_pcov = curve_fit(linear, masked_time, fwhm_x)
+            y_popt, y_pcov = curve_fit(linear, masked_time, fwhm_y)
+            #e_popt, e_pcov = curve_fit(linear, masked_time, masked_ecen)
+            
+            time_cont = np.linspace(0,25,2500)
+            
+            ax1.scatter(masked_time, fwhm_x, color='salmon', marker='.', label='X FWHM')
+            ax1.plot(time_cont,linear(time_cont,*x_popt), color='salmon', linestyle='--')
+            
+            ax1.scatter(masked_time, fwhm_y, color='#4682B4', marker='.', label='Y FWHM')
+            ax1.plot(time_cont,linear(time_cont,*y_popt), color='#4682B4', linestyle='--')
+            
+            ax1.set_title('2D Gaussian FWHM')
+            ax1.legend(loc='lower right')
+            
+            ax1.set_xlim(0,25)
+            ax1.set_ylim(0,((np.max(np.maximum(self.psf_data_tbl['FWHM_x'][tot_mask],self.psf_data_tbl['FWHM_y'][tot_mask]))//5)+1)*5)
+            
+            ax1.set_xlabel("Time from Initial Observation [min]")
+            ax1.set_ylabel("FWHM [pixels]")
+            
+            # --- Plot 3: Rotation over time ---
+            
+            masked_theta = np.deg2rad(self.psf_data_tbl['Rotation'][tot_mask] % 360)
+            
+            norm_time = colors.Normalize(vmin=time.min(), vmax=time.max())
+            cmap = cm.viridis
+            
+            for t, th in zip(masked_time, masked_theta):
+                color = cmap(norm_time(t))
+                ax2.plot([th, th], [0, 1], color=color) 
+            
+            sm = cm.ScalarMappable(cmap=cmap, norm=norm_time)
+            sm.set_array([])
+            cbar = plt.colorbar(sm, ax=ax2, pad=0.1)
+            cbar.set_label("Time from Initial Observation [min]")
+            
+            ax2.set_theta_zero_location('N')  # 0° pointing up
+            ax2.set_theta_direction(-1)       # clockwise
+            
+            labels = ax2.get_xticks()   
+            label_names = [item.get_text() for item in ax2.get_xticklabels()]
+            
+            ax2.set_title('2D Gaussian Rotation')
+            ax2.set_yticklabels([])
+            new_labels = ['' if np.isclose(t, 0) else item for t, item in zip(labels, label_names)]
+            ax2.set_xticks(labels)
+            ax2.set_xticklabels(new_labels)
+            
+            # --- Plot4: Amplitude over time ---
+            
+            masked_amp = self.psf_data_tbl['Amplitude'][tot_mask]
+            
+            a_popt, a_pcov = curve_fit(linear, masked_time, masked_amp)
+            
+            ax3.scatter(masked_time, masked_amp, color='k', marker='.')
+            ax3.plot(time_cont, linear(time_cont,*a_popt), color='k', linestyle='--')
+            ax3.set_xlim(0,25)
+            
+            ax3.set_title('2D Gaussian Amplitude')
+            ax3.set_xlabel("Time from Initial Observation [min]")
+            ax3.set_ylabel("Amplitude [ADU]")
+            
+            exposures = len(self.psf_data_tbl['Time'])
+            
+            plt.suptitle(f'{exposures - np.sum(tot_mask)}/{exposures} Failed; Median X Drift: {np.median(xdrift_arr):.2f} pixels/min; Median Y Drift: {np.median(ydrift_arr):.2f} pixels/min')
+
+        if verbose == True: 
+            
+            print(f'{exposures - np.sum(tot_mask)}/{exposures} Failed')
+            
+            print(mean_drift,'pixels/min')
+            print(f'Mean X drift: {mean_x_drift} pixels/min')
+            print(f'Mean Y drift: {mean_y_drift} pixels/min')
+
+
+        return drift_resultls
+    
 
 ### TESTING ###
 
-raw_path = '/Users/petershea/Desktop/Research/LFAST/Data/20250521'
+#raw_path = '/Users/petershea/Desktop/Research/LFAST/Data/20250626'
 
-red_path = '/Users/petershea/Desktop/Research/LFAST/Data/20250521_red3'
+#red_path = '/Users/petershea/Desktop/Research/LFAST/Data/20250626_test'
 
-test = RED(raw_path,red_path)
+#test_fit = '/Users/petershea/Desktop/Research/LFAST/Data/20250626_test/stacked_imgs/000009_SHWF_stacked.fits'
 
-test.reduce_all()
+
+#test = RED(raw_path,red_path)
+
+#test.phot_reduce_single(test_fit, True)
+
+
 
