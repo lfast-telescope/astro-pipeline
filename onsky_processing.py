@@ -755,7 +755,7 @@ class RED:
     
     
     
-    def reduce_tracking(self, visualize=False, verbose=False):
+    def reduce_tracking(self, subdirs=None, visualize=False, verbose=False):
         
         self.psf_data_tbl = None
         
@@ -763,9 +763,12 @@ class RED:
             
             onsky_stacked = np.array([])
             SHWF_stacked = np.array([])
+            
+            if subdirs is None:
+                subdirs = self.subdirs
         
             # Interates through subdirs within the main raw data directory
-            for subdir in self.subdirs:
+            for subdir in subdirs:
                 
                 wkdir = f'{self.raw_path}/{subdir}'
                 
@@ -813,9 +816,10 @@ class RED:
                 tbl = self.detect()
                 
                 if tbl is None:
-                    
+
                     self.psf_data_tbl.add_row([self.time,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,
-                                        np.nan])
+                                    np.nan])
+                    
             
                 else:
                     
