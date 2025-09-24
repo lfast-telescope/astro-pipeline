@@ -32,7 +32,7 @@ from photutils.background import Background2D, MMMBackground, MedianBackground, 
 from photutils.utils import circular_footprint, NoDetectionsWarning
 from photutils.psf import fit_2dgaussian
 
-from scipy.optimize import curve_fit
+from scipy.optimize import curve_fit, brentq
 
 
 
@@ -268,6 +268,8 @@ class RED:
         # Final background estimation 
         bkg = Background2D(self.image, (64,64), filter_size=(5,5), sigma_clip=sigma_clip, bkg_estimator=bkg_estimator, mask=mask)
         
+        self.avg_bkg = np.mean(bkg.background)
+        
         # Background subtracting image
         self.imgdata = np.abs(self.image.astype(float) - (bkg.background))
         
@@ -450,10 +452,10 @@ class RED:
         amplitude = g_fit.amplitude.value
         
         # Defines column names for data table of 2d gaussian characteristics 
-        col_names = np.array(['Time','x_0','y_0','FWHM_x','FWHM_x_err','FWHM_y','FWHM_y_err','Eccentricity','Rotation','Amplitude'])
+        self.col_names = np.array(['Time','x_0','y_0','FWHM_x','FWHM_x_err','FWHM_y','FWHM_y_err','Eccentricity','Rotation','Amplitude'])
         
         # Creates empty astropy table with designated column names 
-        data_table = Table(names=col_names)
+        data_table = Table(names=self.col_names)
         
         # Appends a row for the source to the data table
         data_table.add_row([self.time,round(x_0,2),round(y_0,2),round(fwhm_x,2),
@@ -537,11 +539,37 @@ class RED:
     
     
     
-    def visualize_detected_sources(self):
+    def visualize_detected_sources(self, bkg_sub_img=None, source_tbl=None):
+        
+        '''
+        
+        Parameters:
+            source_tbl: type of source list using, txt default is f'{red_path}/tracking_psf_data.txt'
+        
+        '''
+        
+        norm = ImageNormalize(stretch=SqrtStretch())
         
         fig, ax = plt.subplots()
-    
-        ax.imshow(self.imgdata, norm=norm, cmap='Greys_r', interpolation='nearest', origin='lower')
+        
+        if bkg_sub_img is None:
+            ax.imshow(self.imgdata, norm=norm, cmap='Greys_r', interpolation='nearest', origin='lower')
+        
+        else:
+            self.load_fits(bkg_sub_img)
+            ax.imshow(self.image, norm=norm, cmap='Greys_r', interpolation='nearest', origin='lower')
+            
+        if source_tbl is None:
+            ax.scatter(self.sources_table['xcentroid'],self.sources_table['ycentroid'])
+            
+        elif source_tbl == 'psf':
+            ax.scatetr(self.psf_data_tbl['x_0'],self.source_table['y_0'])
+        
+        else:
+            table = Table.read(source_tbl, format='ascii.fixed_width')
+            ax.scatter(table['x_0'], table['y_0'])
+            
+            
     
     def phot_reduce_single(self, fits_file, save_bkg_sub):
         '''
@@ -643,8 +671,247 @@ class RED:
         # visualizes result of fit 
         if visualize == True:
             self.visualize_2dgauss(psf_characteristics)
-     
+    
+    
+    def fit_1dgauss(self, x, y, mean, sigma, amplitude):
         
+        g_init = models.Gaussian1D(amplitude=amplitude, mean=mean, stddev=sigma)
+
+        # Fitter
+        fitter = fitting.LevMarLSQFitter()
+    
+        # Perform fit
+        best_fit = fitter(g_init, x, y)
+        cov = fitter.fit_info.get("param_cov", None)  # may be None if fit failed to estimate
+        
+        return best_fit, cov
+    
+    
+    def gaussian_inverse_numeric(self, model, y_val, x_range, cov, guess=None):
+        """
+        Compute x such that model(x) = y_val, with uncertainty from the fit covariance.
+    
+        Parameters
+        ----------
+        y_val : float
+            Target y value.
+        model : astropy.modeling.models.Gaussian1D
+            Fitted Gaussian model (with attributes amplitude, mean, stddev).
+        cov : ndarray
+            3x3 covariance matrix of the parameters [amplitude, mean, stddev].
+        guess : float or None
+            Optional initial guess to pick the closest root to this value.
+            If None, uses the mean of the Gaussian.
+    
+        Returns
+        -------
+        x : float
+            Estimated x value.
+        sigma_x : float
+            Uncertainty in x propagated from fit covariance.
+        """
+        f = lambda x: model(x) - y_val
+
+        # find root
+        x = brentq(f, x_range[0], x_range[-1])
+    
+        # compute derivatives using implicit differentiation
+        A = model.amplitude.value
+        mu = model.mean.value
+        sigma = model.stddev.value
+    
+        exp_term = np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+        df_dx = (A / sigma ** 2) * (x - mu) * exp_term  # derivative w.r.t x
+    
+        # partial derivatives w.r.t parameters using dx/dp = - df/dp / df/dx
+        dfdA = exp_term
+        dfdmu = A * exp_term * (x - mu) / sigma ** 2
+        dfdsigma = A * exp_term * ((x - mu) ** 2) / sigma ** 3
+    
+        dx_dA = -dfdA / df_dx
+        dx_dmu = -dfdmu / df_dx
+        dx_dsigma = -dfdsigma / df_dx
+    
+        J = np.array([dx_dA, dx_dmu, dx_dsigma])
+        sigma_x = np.sqrt(J @ cov @ J)
+    
+        return x, sigma_x
+    
+    
+    def new_focus_red_one(self, fits_file, visualize=False):
+        
+        self.load_fits(fits_file)
+        
+        tbl = self.detect()
+        
+        imgdata = self.imgdata
+        avg_bkg = self.avg_bkg
+        
+        if len(tbl) > 1:
+            center_est = self.avg_source()
+        else:
+            center_est = (tbl['xcentroid'].value[0], tbl['ycentroid'].value[0])
+        
+        pix_x = int(center_est[0])
+        pix_y = int(center_est[1])
+        
+        x_profile = np.array([imgdata[pix_y,pix_x]])
+        y_profile = np.array([imgdata[pix_y,pix_x]])
+        
+        x_range = np.array([pix_x])
+        y_range = np.array([pix_y])
+        
+        for i in range(50):
+            x_profile = np.append(x_profile,imgdata[pix_y,pix_x+i+1])
+            y_profile = np.append(y_profile,imgdata[pix_y+i+1,pix_x])
+            
+            x_range = np.append(x_range,pix_x+i+1)
+            y_range = np.append(y_range,pix_y+i+1)
+            
+        x_prof_max = np.max(x_profile)
+        y_prof_max = np.max(y_profile)
+        
+        x_mean = np.argmax(x_profile)
+        y_mean = np.argmax(y_profile)
+        
+        id_x = np.abs(x_profile - (x_prof_max/2)).argmin()
+        id_y = np.abs(y_profile - (y_prof_max/2)).argmin()
+        
+        hwhm_x = x_range[id_x]-pix_x
+        hwhm_y = y_range[id_y]-pix_y
+        
+        fwhm_x = 2 * hwhm_x
+        fwhm_y = 2 * hwhm_y
+        
+        sigma_x = gaussian_fwhm_to_sigma * fwhm_x
+        sigma_y = gaussian_fwhm_to_sigma * fwhm_y
+        
+        x_amp = x_profile.max() - x_profile.min()
+        y_amp = y_profile.max() - y_profile.min()
+        
+        x_gauss, x_cov = self.fit_1dgauss(x_range[x_mean:],x_profile[x_mean:],x_range[x_mean],sigma_x,x_amp)
+        y_gauss, y_cov = self.fit_1dgauss(y_range[y_mean:],y_profile[y_mean:],y_range[y_mean],sigma_y,y_amp)
+        
+        x_guess, x_err = self.gaussian_inverse_numeric(x_gauss, x_prof_max/2, x_range[x_mean:],x_cov)
+        y_guess, y_err = self.gaussian_inverse_numeric(y_gauss, y_prof_max/2, y_range[y_mean:],y_cov)
+        
+        x_hwhm = np.abs(center_est[0] - x_guess)
+        y_hwhm = np.abs(center_est[1] - y_guess)
+        
+        if visualize is True:
+            fig, ax = plt.subplots(1,2, layout='constrained')
+            
+            ax[0].plot(x_range,x_profile)
+            ax[1].plot(y_range,y_profile)
+            
+            ax[0].axvline(x=x_range[id_x])
+            ax[0].axhline(y=x_prof_max/2)
+            ax[1].axvline(x=y_range[id_y])
+            ax[1].axhline(y=y_prof_max/2)
+            
+            ax[0].plot(x_range, x_gauss(x_range), linestyle='--',c='k')
+            ax[1].plot(y_range, y_gauss(y_range), linestyle='--',c='k')
+            
+            ax[0].axvline(x=x_guess, c='k')
+            ax[1].axvline(x=y_guess, c='k')
+        
+        return (x_hwhm, x_err), (y_hwhm, y_err)
+    
+    
+    
+    def new_red_focus_sweep(self, focus_arr, visualize=False):
+        
+        if not len(self.subdirs) == 0:
+            stack_path = f'{red_path}/stacked_imgs'
+            if os.path.isdir(stack_path):
+                num_stacked = len(np.array([f for f in sorted(os.listdir(stack_path)) if f.endswith('.FIT') or f.endswith('.fits')]))
+            
+                if num_stacked == len(self.subdirs):
+                    fits_names = np.array([f for f in sorted(os.listdir(stack_path)) if f.endswith('.FIT') or f.endswith('.fits')])
+                
+                    fits_paths = np.array([])
+                    
+                    for i in range(len(fits_names)):
+                        fits_paths = np.append(fits_paths,f'{stack_path}/{fits_names[i]}')
+                    
+                    self.fits_imgs = fits_paths
+                        
+                
+                else:
+                    for subdir in self.subdirs:
+                        self.stack(f'{self.raw_path}/{subdir}',subdir)
+                    
+                    # Defines global variable fits_imgs to be the stacked fits  for reduction
+                    self.fits_imgs = self.stacked_fits
+        
+            else:
+                for subdir in self.subdirs:
+                    self.stack(f'{self.raw_path}/{subdir}',subdir)
+                
+                # Defines global variable fits_imgs to be the stacked fits  for reduction
+                self.fits_imgs = self.stacked_fits
+        
+        
+        x_fwhm_arr = np.array([])
+        y_fwhm_arr = np.array([])
+        
+        x_fwhm_err = np.array([])
+        y_fwhm_err = np.array([])
+        
+        # Reduces each fits file in fits_imgs global variable
+        for fits_img in self.fits_imgs:
+            x_data, y_data = self.new_focus_red_one(fits_img)
+            
+            x_fwhm_arr = np.append(x_fwhm_arr,x_data[0]*2)
+            y_fwhm_arr = np.append(y_fwhm_arr,y_data[0]*2)
+            
+            x_fwhm_err = np.append(x_fwhm_err,x_data[1]*2)
+            y_fwhm_err = np.append(y_fwhm_err,y_data[1]*2)
+        
+        vertical_hyperbola = lambda x, h, k, a, b: k + np.sqrt(a**2 * (1 + ((x - h)**2) / b**2))
+        
+        xpopt, xpcov = curve_fit(vertical_hyperbola, focus_arr, x_fwhm_arr, sigma=x_fwhm_err, absolute_sigma=True)
+        ypopt, ypcov = curve_fit(vertical_hyperbola, focus_arr, y_fwhm_arr, sigma=y_fwhm_err, absolute_sigma=True)
+        
+        # Defines continuum for proper graphing of fit models
+        focus_cont = np.linspace(np.min(focus_arr),np.max(focus_arr),1000)
+
+        # Creates models for x_FWHM(focus_pos) and y_FWHM(focus_pos)
+        x_focus = vertical_hyperbola(focus_cont, *xpopt)
+        y_focus = vertical_hyperbola(focus_cont, *ypopt)
+        
+        # Defines magnitude of FWHM in order to determine optimal focus
+        tot_foc = np.sqrt(x_focus**2 + y_focus**2)
+
+        # Finds index of the minimum in total focus which is defined as the optimal focus position
+        optimal_focus = np.argmin(tot_foc)
+        
+        if visualize == True:
+            # Creates a plot to display focus sweep data
+            fig, ax = plt.subplots(layout='constrained')
+            
+            # Scatter plot with y_err of fwhm at each focus position
+            ax.errorbar(focus_arr,x_fwhm_arr,yerr=x_fwhm_err,c='#4682B4',marker='.',linestyle='none')
+            ax.errorbar(focus_arr,y_fwhm_arr,yerr=y_fwhm_err,c='salmon',marker='.',linestyle='none')
+            
+            # Plots the fit hyperbolic models 
+            ax.plot(focus_cont, x_focus, c='#4682B4', label='x fwhm')
+            ax.plot(focus_cont, y_focus, c='salmon', label='y fwhm')
+            
+            # Plots a vertical line at the location of optimal focus
+            ax.axvline(x=focus_cont[optimal_focus],c='gray',linestyle='--', label=f'Optimal Focus: {focus_cont[optimal_focus]:.2f} [µm]')
+            
+            # Plot Formatting
+            ax.set_title('Focus Sweep: 20250521') # Need to come back and make more modular
+            ax.set_xlabel('Focus Position [µm]') # Displays optimal focus found
+            ax.set_ylabel('FWHM [pixels]')
+            ax.legend()
+            
+            plt.show()
+        
+        return f'{focus_cont[optimal_focus]:.2f} [µm]'
+    
+    
     
     def reduce_focus_sweep(self, focus_arr, visualize=False):
         '''
@@ -814,8 +1081,19 @@ class RED:
                 
                 if tbl is None:
                     
-                    self.psf_data_tbl.add_row([self.time,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,
-                                        np.nan])
+                    blank_row = np.array([self.time,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan,np.nan])
+                    
+                    if self.psf_data_tbl == None:
+                        
+                        data_table = Table(names=self.col_names)
+                        
+                        data_table.add_row(blank_row)
+                        
+                        self.psf_data_tbl = data_table
+                        
+                    # Otherwise concaternates tables to append psf data of subsuquent images
+                    else:
+                        self.psf_data_tbl.add_row(blank_row)
             
                 else:
                     
@@ -988,16 +1266,17 @@ class RED:
 
 ### TESTING ###
 
-#raw_path = '/Users/petershea/Desktop/Research/LFAST/Data/20250626'
+raw_path = '/Users/petershea/Desktop/Research/LFAST/Data/20250521'
 
-#red_path = '/Users/petershea/Desktop/Research/LFAST/Data/20250626_test'
+red_path = '/Users/petershea/Desktop/Research/LFAST/Data/20250521_test2'
 
-#test_fit = '/Users/petershea/Desktop/Research/LFAST/Data/20250626_test/stacked_imgs/000009_SHWF_stacked.fits'
+test_fit = '/Users/petershea/Desktop/Research/LFAST/Data/20250521_test/stacked_imgs/2025-05-22_04_51_30Z_stacked.fits'
 
+focus_arr = np.array([-400,-320,-240,-160,-80,0,80,160,240,320,400,480,560,640])
 
-#test = RED(raw_path,red_path)
+test = RED(raw_path,red_path)
 
-#test.phot_reduce_single(test_fit, True)
+test.new_red_focus_sweep(focus_arr, visualize=True)
 
 
 
