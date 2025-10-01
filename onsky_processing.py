@@ -819,7 +819,7 @@ class RED:
     
     
     
-    def new_red_focus_sweep(self, focus_arr, visualize=False):
+    def new_red_focus_sweep(self, focus_arr, subdirs=None, visualize=False):
         
         if not len(self.subdirs) == 0:
             stack_path = f'{red_path}/stacked_imgs'
@@ -845,7 +845,10 @@ class RED:
                     self.fits_imgs = self.stacked_fits
         
             else:
-                for subdir in self.subdirs:
+                if subdirs is None:
+                    subdirs = self.subdirs
+                    
+                for subdir in subdirs:
                     self.stack(f'{self.raw_path}/{subdir}',subdir)
                 
                 # Defines global variable fits_imgs to be the stacked fits  for reduction
@@ -913,7 +916,7 @@ class RED:
     
     
     
-    def reduce_focus_sweep(self, focus_arr, visualize=False):
+    def reduce_focus_sweep(self, focus_arr, subdirs=None, visualize=False):
         '''
         Function to determine optimal focus point based on minimizing fwhm from
         focus sweep data set. Reduces all files in raw_path to do so
@@ -931,9 +934,12 @@ class RED:
         if not len(self.subdirs) == 0:
             stack_path = f'{red_path}/stacked_imgs'
             if os.path.isdir(stack_path):
+                if subdirs is None:
+                    subdirs = self.subdirs
+                
                 num_stacked = len(np.array([f for f in sorted(os.listdir(stack_path)) if f.endswith('.FIT') or f.endswith('.fits')]))
             
-                if num_stacked == len(self.subdirs):
+                if num_stacked == len(subdirs):
                     fits_names = np.array([f for f in sorted(os.listdir(stack_path)) if f.endswith('.FIT') or f.endswith('.fits')])
                 
                     fits_paths = np.array([])
@@ -952,7 +958,10 @@ class RED:
                     self.fits_imgs = self.stacked_fits
         
             else:
-                for subdir in self.subdirs:
+                if subdirs is None:
+                    subdirs = self.subdirs
+                
+                for subdir in subdirs:
                     self.stack(f'{self.raw_path}/{subdir}',subdir)
                 
                 # Defines global variable fits_imgs to be the stacked fits  for reduction
@@ -1269,17 +1278,18 @@ class RED:
 
 ### TESTING ###
 
-raw_path = '/Users/petershea/Desktop/Research/LFAST/Data/20250521'
+raw_path = '/home/steward/lfast/star_testing/20250930'
 
-red_path = '/Users/petershea/Desktop/Research/LFAST/Data/20250521_test2'
+red_path = '/home/steward/lfast/star_testing/20250930_focus_sweep_red2'
 
-test_fit = '/Users/petershea/Desktop/Research/LFAST/Data/20250521_test/stacked_imgs/2025-05-22_04_51_30Z_stacked.fits'
+subdirs = np.array(['230226', '230312', '230352', '230451', '230542', '230629', '230704', '230742', '230829'])
 
-focus_arr = np.array([-400,-320,-240,-160,-80,0,80,160,240,320,400,480,560,640])
+#test_fit = '/Users/petershea/Desktop/Research/LFAST/Data/20250521_test/stacked_imgs/2025-05-22_04_51_30Z_stacked.fits'
+
+#focus_arr = np.array([-400,-320,-240,-160,-80,0,80,160,240,320,400,480,560,640])
 
 test = RED(raw_path,red_path)
 
-test.new_red_focus_sweep(focus_arr, visualize=True)
-
+test.reduce_focus_sweep(focus_arr=np.linspace(-800,800,9),subdirs=subdirs,visualize=True)
 
 
