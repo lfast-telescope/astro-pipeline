@@ -1,4 +1,6 @@
-#!/usr/bin/env python3
+#%%
+# #!/usr/bin/env python3
+
 # -*- coding: utf-8 -*-
 """
 Created on Fri Sep  5 10:09:22 2025
@@ -135,7 +137,7 @@ class RED:
 
 
 
-    def stack(self, subdir, stacked_filename, specific_fits=None, sigma=3):
+    def stack(self, subdir, stacked_filename, specific_fits=None, sigma=3, specific_suffix=None):
         '''
         Function to stack images to increase snr.
         
@@ -161,12 +163,18 @@ class RED:
         self.stacked_path = f'{self.red_path}/stacked_imgs'
     
         if not os.path.isdir(self.stacked_path):os.mkdir(self.stacked_path)
+
+        files = sorted(os.listdir(subdir))
         
         # Default; pulls all files from given directory and compiles list of fits images to stack 
-        if specific_fits is None:
-            files = sorted(os.listdir(subdir))
+        if specific_fits is None and specific_suffix is None:
             self.fits_imgs = np.array([f for f in files if f.endswith('.FIT') or f.endswith('.fits')])
-            
+        
+        elif specific_fits is not None:
+           self.fits_imgs = specific_fits
+        elif specific_suffix is not None:
+                self.fits_imgs = np.array([f for f in files if f.endswith(specific_suffix)])
+                
         # If specific fits files within the directory are specified only stack those
         else:
             self.fits_imgs = specific_fits
@@ -916,17 +924,20 @@ class RED:
     
     
     
-    def reduce_focus_sweep(self, focus_arr, subdirs=None, visualize=False):
+    def reduce_focus_sweep(self, focus_arr, subdirs=None, visualize=False, specific_suffix=None):
         '''
         Function to determine optimal focus point based on minimizing fwhm from
         focus sweep data set. Reduces all files in raw_path to do so
         
         Parameters:
             focus_arr: ndarray [µm]; array of focus positions associated with each image
+            subdirs: selected folders (eg timestamps) within the parent directory to be considered
             visualize: boolean; determines if plot of focus sweep data should be created
+            specific_suffix: string of the filesuffix that should be considered, eg ".zwo.fits"
         
         Returns:
             optimal_focus: float [µm]; the optimal focus location to minimize source fwhm in x and y
+        
         '''
         
         # Determines mode: if there are subdirs then stack images within subdirs and reduce stacked images
@@ -952,7 +963,7 @@ class RED:
                 
                 else:
                     for subdir in self.subdirs:
-                        self.stack(f'{self.raw_path}/{subdir}',subdir)
+                        self.stack(f'{self.raw_path}/{subdir}',subdir, specific_suffix=specific_suffix)
                     
                     # Defines global variable fits_imgs to be the stacked fits  for reduction
                     self.fits_imgs = self.stacked_fits
@@ -962,7 +973,7 @@ class RED:
                     subdirs = self.subdirs
                 
                 for subdir in subdirs:
-                    self.stack(f'{self.raw_path}/{subdir}',subdir)
+                    self.stack(f'{self.raw_path}/{subdir}',subdir, specific_suffix=specific_suffix)
                 
                 # Defines global variable fits_imgs to be the stacked fits  for reduction
                 self.fits_imgs = self.stacked_fits
@@ -1275,21 +1286,22 @@ class RED:
 
         return drift_resultls
     
+#%%
 
 ### TESTING ###
 
-raw_path = '/home/steward/lfast/star_testing/20250930'
+raw_path = '/home/steward/lfast/star_testing/20260318/'
 
-red_path = '/home/steward/lfast/star_testing/20250930_focus_sweep_red2'
+red_path = '/home/steward/lfast/star_testing/20260318/'
 
-subdirs = np.array(['230226', '230312', '230352', '230451', '230542', '230629', '230704', '230742', '230829'])
-
+subdirs = ['224503', '224623', '224857', '224945', '225025', '225106',
+       '225147', '225228', '225309']
 #test_fit = '/Users/petershea/Desktop/Research/LFAST/Data/20250521_test/stacked_imgs/2025-05-22_04_51_30Z_stacked.fits'
 
 #focus_arr = np.array([-400,-320,-240,-160,-80,0,80,160,240,320,400,480,560,640])
 
 test = RED(raw_path,red_path)
 
-test.reduce_focus_sweep(focus_arr=np.linspace(-800,800,9),subdirs=subdirs,visualize=True)
+test.reduce_focus_sweep(focus_arr=np.linspace(-800,800,9),subdirs=subdirs,visualize=True,specific_suffix=".zwo.fits")
 
 
