@@ -183,13 +183,11 @@ class RED:
         stack = np.array([fits.getdata(f'{subdir}/{f}') for f in self.fits_imgs])  
         
         # Define sigma clip and clip stacked data
-        clipped = sigma_clip(stack,sigma=sigma,axis=0)
+        #To speed process, avoid MaskedArray overhead by using sigma_clip with masked=False and set maxiters=2
+        clipped = sigma_clip(stack,sigma=sigma,axis=0,masked=False,maxiters=2, copy=True)
         
         # Average stacked data
-        stacked_image = np.mean(clipped, axis=0)
-        
-        # Insert nans to ensure array is full
-        stacked_image = np.asarray(stacked_image.filled(np.nan)) 
+        stacked_image = np.nanmean(clipped, axis=0)
         
         # Variable to store filename
         self.stacked_filename = f'{self.stacked_path}/{stacked_filename}_stacked.fits'
@@ -942,7 +940,8 @@ class RED:
         
         # Determines mode: if there are subdirs then stack images within subdirs and reduce stacked images
         #       otherwise: reduce all fits images within the directory separately (no stacking)
-        if not len(self.subdirs) == 0:
+        valid_subdirs = [subdir for subdir in self.subdirs if (os.path.isdir(f'{self.red_path}/{subdir}')) and not subdir.endswith('stacked_imgs')]
+        if not len(valid_subdirs) == 0:
             stack_path = f'{red_path}/stacked_imgs'
             if os.path.isdir(stack_path):
                 if subdirs is None:
@@ -950,7 +949,7 @@ class RED:
                 
                 num_stacked = len(np.array([f for f in sorted(os.listdir(stack_path)) if f.endswith('.FIT') or f.endswith('.fits')]))
             
-                if num_stacked == len(subdirs):
+                if num_stacked == len(valid_subdirs):
                     fits_names = np.array([f for f in sorted(os.listdir(stack_path)) if f.endswith('.FIT') or f.endswith('.fits')])
                 
                     fits_paths = np.array([])
@@ -962,7 +961,7 @@ class RED:
                         
                 
                 else:
-                    for subdir in self.subdirs:
+                    for subdir in valid_subdirs:
                         self.stack(f'{self.raw_path}/{subdir}',subdir, specific_suffix=specific_suffix)
                     
                     # Defines global variable fits_imgs to be the stacked fits  for reduction
