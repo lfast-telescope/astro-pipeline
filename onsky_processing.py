@@ -156,8 +156,13 @@ class RED:
             fits_imgs: ndarray [str]; list of all fits images within the given subdir
         '''
         
-        # Defines empty list as global variable 
-        self.stacked_fits = np.array([])
+        if subdir.endswith('stacked_imgs'):
+            print('Tried to stack images within the stacked_imgs directory, skipping')
+            return None
+        
+        # Defines empty list as global variable, unless it already exists 
+        if not hasattr(self, 'stacked_fits'):
+            self.stacked_fits = np.array([])
         
         # Defines absolute path to location where stacked images are saved
         self.stacked_path = f'{self.red_path}/stacked_imgs'
