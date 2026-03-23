@@ -584,7 +584,7 @@ class RED:
     
     def phot_reduce_single(self, fits_file, save_bkg_sub):
         '''
-        WIP FUNCTION: produces psf chaaracteristics for all sources detected in a given fits file
+        WIP FUNCTION: produces psf characteristics for all sources detected in a given fits file
         
         Parameters:
             fits_file: str; absolute path to desired fits image
@@ -882,17 +882,24 @@ class RED:
             x_fwhm_err = np.append(x_fwhm_err,x_data[1]*2)
             y_fwhm_err = np.append(y_fwhm_err,y_data[1]*2)
         
-        vertical_hyperbola = lambda x, h, k, a, b: k + np.sqrt(a**2 * (1 + ((x - h)**2) / b**2))
+        # 3-parameter hyperbola: f0 = min FWHM at best focus, s = defocus slope, h = best focus position
+        # f(x) = sqrt(f0^2 + s^2 * (x - h)^2)
+        focus_hyperbola = lambda x, h, f0, s: np.sqrt(f0**2 + s**2 * (x - h)**2)
         
-        xpopt, xpcov = curve_fit(vertical_hyperbola, focus_arr, x_fwhm_arr, sigma=x_fwhm_err, absolute_sigma=True)
-        ypopt, ypcov = curve_fit(vertical_hyperbola, focus_arr, y_fwhm_arr, sigma=y_fwhm_err, absolute_sigma=True)
+        # Initial guesses from data
+        focus_range = focus_arr[-1] - focus_arr[0]
+        x_p0 = [focus_arr[np.argmin(x_fwhm_arr)], np.min(x_fwhm_arr), np.ptp(x_fwhm_arr) / (focus_range / 2)]
+        y_p0 = [focus_arr[np.argmin(y_fwhm_arr)], np.min(y_fwhm_arr), np.ptp(y_fwhm_arr) / (focus_range / 2)]
+        fit_bounds = ([focus_arr.min(), 0.1, 0], [focus_arr.max(), np.inf, np.inf])
+        xpopt, xpcov = curve_fit(focus_hyperbola, focus_arr, x_fwhm_arr, p0=x_p0, bounds=fit_bounds, sigma=x_fwhm_err, absolute_sigma=True)
+        ypopt, ypcov = curve_fit(focus_hyperbola, focus_arr, y_fwhm_arr, p0=y_p0, bounds=fit_bounds, sigma=y_fwhm_err, absolute_sigma=True)
         
         # Defines continuum for proper graphing of fit models
         focus_cont = np.linspace(np.min(focus_arr),np.max(focus_arr),1000)
 
         # Creates models for x_FWHM(focus_pos) and y_FWHM(focus_pos)
-        x_focus = vertical_hyperbola(focus_cont, *xpopt)
-        y_focus = vertical_hyperbola(focus_cont, *ypopt)
+        x_focus = focus_hyperbola(focus_cont, *xpopt)
+        y_focus = focus_hyperbola(focus_cont, *ypopt)
         
         # Defines magnitude of FWHM in order to determine optimal focus
         tot_foc = np.sqrt(x_focus**2 + y_focus**2)
@@ -991,8 +998,9 @@ class RED:
         # Saves psf characteristic table for all reduced images to a txt
         self.psf_data_tbl.write(f'{self.red_path}/{self.raw_date}_focus_data.txt', format='ascii.fixed_width', overwrite=True)
         
-        # Function for upper branch of vertical hyperbola
-        vertical_hyperbola = lambda x, h, k, a, b: k + np.sqrt(a**2 * (1 + ((x - h)**2) / b**2))
+        # 3-parameter hyperbola: f0 = min FWHM at best focus, s = defocus slope, h = best focus position
+        # f(x) = sqrt(f0^2 + s^2 * (x - h)^2)
+        focus_hyperbola = lambda x, h, f0, s: np.sqrt(f0**2 + s**2 * (x - h)**2)
         
         # Pulls columns for psf fwhm from global data table
         x_fwhm_arr = self.psf_data_tbl['FWHM_x']
@@ -1003,15 +1011,20 @@ class RED:
         y_fwhm_err = self.psf_data_tbl['FWHM_y_err']
         
         # Fits hyperbola to the x and y fwhm as they change over focus sweep
-        xpopt, xpcov = curve_fit(vertical_hyperbola, focus_arr, x_fwhm_arr, sigma=x_fwhm_err, absolute_sigma=True)
-        ypopt, ypcov = curve_fit(vertical_hyperbola, focus_arr, y_fwhm_arr, sigma=y_fwhm_err, absolute_sigma=True)
+        # Initial guesses from data: h=focus at min FWHM, f0=min FWHM, s=slope estimate
+        focus_range = focus_arr[-1] - focus_arr[0]
+        x_p0 = [focus_arr[np.argmin(x_fwhm_arr)], np.min(x_fwhm_arr), np.ptp(x_fwhm_arr) / (focus_range / 2)]
+        y_p0 = [focus_arr[np.argmin(y_fwhm_arr)], np.min(y_fwhm_arr), np.ptp(y_fwhm_arr) / (focus_range / 2)]
+        fit_bounds = ([focus_arr.min(), 0.1, 0], [focus_arr.max(), np.inf, np.inf])
+        xpopt, xpcov = curve_fit(focus_hyperbola, focus_arr, x_fwhm_arr, p0=x_p0, bounds=fit_bounds, sigma=x_fwhm_err, absolute_sigma=True)
+        ypopt, ypcov = curve_fit(focus_hyperbola, focus_arr, y_fwhm_arr, p0=y_p0, bounds=fit_bounds, sigma=y_fwhm_err, absolute_sigma=True)
         
         # Defines continuum for proper graphing of fit models
         focus_cont = np.linspace(np.min(focus_arr),np.max(focus_arr),1000)
 
         # Creates models for x_FWHM(focus_pos) and y_FWHM(focus_pos)
-        x_focus = vertical_hyperbola(focus_cont, *xpopt)
-        y_focus = vertical_hyperbola(focus_cont, *ypopt)
+        x_focus = focus_hyperbola(focus_cont, *xpopt)
+        y_focus = focus_hyperbola(focus_cont, *ypopt)
         
         # Defines magnitude of FWHM in order to determine optimal focus
         tot_foc = np.sqrt(x_focus**2 + y_focus**2)
@@ -1042,9 +1055,7 @@ class RED:
             
             plt.show()
         
-        return f'{focus_cont[optimal_focus]:.2f} [µm]'
-    
-    
+        return focus_cont[optimal_focus]
     
     def reduce_tracking(self, subdirs=None, visualize=False, verbose=False):
         
@@ -1293,19 +1304,17 @@ class RED:
 #%%
 
 ### TESTING ###
+if __name__ == "__main__":
+    raw_path = '/home/steward/lfast/star_testing/20260319/233736_focus_sweep/'
 
-raw_path = '/home/steward/lfast/star_testing/20260318/'
+    red_path = '/home/steward/lfast/star_testing/20260319/233736_focus_sweep/'
 
-red_path = '/home/steward/lfast/star_testing/20260318/'
-
-subdirs = ['224503', '224623', '224857', '224945', '225025', '225106',
-       '225147', '225228', '225309']
-#test_fit = '/Users/petershea/Desktop/Research/LFAST/Data/20250521_test/stacked_imgs/2025-05-22_04_51_30Z_stacked.fits'
+    subdirs = os.listdir(red_path)
+    #test_fit = '/Users/petershea/Desktop/Research/LFAST/Data/20250521_test/stacked_imgs/2025-05-22_04_51_30Z_stacked.fits'
 
 #focus_arr = np.array([-400,-320,-240,-160,-80,0,80,160,240,320,400,480,560,640])
 
-test = RED(raw_path,red_path)
+    test = RED(raw_path,red_path)
 
-test.reduce_focus_sweep(focus_arr=np.linspace(-800,800,9),subdirs=subdirs,visualize=True,specific_suffix=".zwo.fits")
-
-
+    focus_correction = test.reduce_focus_sweep(focus_arr=np.linspace(-800,800,9),subdirs=subdirs,visualize=True,specific_suffix=".zwo.fits")
+    print(f'Optimal Focus: {focus_correction}')
