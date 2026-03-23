@@ -1009,28 +1009,32 @@ class RED:
         # Pulls colums for psf fwhm error from global data table
         x_fwhm_err = self.psf_data_tbl['FWHM_x_err']
         y_fwhm_err = self.psf_data_tbl['FWHM_y_err']
+
+        # Average FWHM magnitude and its propagated error
+        avg_fwhm_arr = np.sqrt(x_fwhm_arr**2 + y_fwhm_arr**2)
+        avg_fwhm_err = np.sqrt((x_fwhm_arr * x_fwhm_err)**2 + (y_fwhm_arr * y_fwhm_err)**2) / avg_fwhm_arr
         
         # Fits hyperbola to the x and y fwhm as they change over focus sweep
         # Initial guesses from data: h=focus at min FWHM, f0=min FWHM, s=slope estimate
         focus_range = focus_arr[-1] - focus_arr[0]
         x_p0 = [focus_arr[np.argmin(x_fwhm_arr)], np.min(x_fwhm_arr), np.ptp(x_fwhm_arr) / (focus_range / 2)]
         y_p0 = [focus_arr[np.argmin(y_fwhm_arr)], np.min(y_fwhm_arr), np.ptp(y_fwhm_arr) / (focus_range / 2)]
+        avg_p0 = [focus_arr[np.argmin(avg_fwhm_arr)], np.min(avg_fwhm_arr), np.ptp(avg_fwhm_arr) / (focus_range / 2)]
         fit_bounds = ([focus_arr.min(), 0.1, 0], [focus_arr.max(), np.inf, np.inf])
         xpopt, xpcov = curve_fit(focus_hyperbola, focus_arr, x_fwhm_arr, p0=x_p0, bounds=fit_bounds, sigma=x_fwhm_err, absolute_sigma=True)
         ypopt, ypcov = curve_fit(focus_hyperbola, focus_arr, y_fwhm_arr, p0=y_p0, bounds=fit_bounds, sigma=y_fwhm_err, absolute_sigma=True)
+        avgpopt, avgpcov = curve_fit(focus_hyperbola, focus_arr, avg_fwhm_arr, p0=avg_p0, bounds=fit_bounds, sigma=avg_fwhm_err, absolute_sigma=True)
         
         # Defines continuum for proper graphing of fit models
         focus_cont = np.linspace(np.min(focus_arr),np.max(focus_arr),1000)
 
-        # Creates models for x_FWHM(focus_pos) and y_FWHM(focus_pos)
+        # Creates models for x_FWHM(focus_pos), y_FWHM(focus_pos), and avg_FWHM(focus_pos)
         x_focus = focus_hyperbola(focus_cont, *xpopt)
         y_focus = focus_hyperbola(focus_cont, *ypopt)
-        
-        # Defines magnitude of FWHM in order to determine optimal focus
-        tot_foc = np.sqrt(x_focus**2 + y_focus**2)
+        avg_focus = focus_hyperbola(focus_cont, *avgpopt)
 
-        # Finds index of the minimum in total focus which is defined as the optimal focus position
-        optimal_focus = np.argmin(tot_foc)
+        # Finds index of the minimum in the avg FWHM fit as the optimal focus position
+        optimal_focus = np.argmin(avg_focus)
         
         if visualize == True:
             # Creates a plot to display focus sweep data
@@ -1039,10 +1043,12 @@ class RED:
             # Scatter plot with y_err of fwhm at each focus position
             ax.errorbar(focus_arr,x_fwhm_arr,yerr=x_fwhm_err,c='#4682B4',marker='.',linestyle='none')
             ax.errorbar(focus_arr,y_fwhm_arr,yerr=y_fwhm_err,c='salmon',marker='.',linestyle='none')
+            ax.errorbar(focus_arr,avg_fwhm_arr,yerr=avg_fwhm_err,c='mediumpurple',marker='.',linestyle='none')
             
             # Plots the fit hyperbolic models 
             ax.plot(focus_cont, x_focus, c='#4682B4', label='x fwhm')
             ax.plot(focus_cont, y_focus, c='salmon', label='y fwhm')
+            ax.plot(focus_cont, avg_focus, c='mediumpurple', label=r'avg fwhm $\sqrt{x^2+y^2}$')
             
             # Plots a vertical line at the location of optimal focus
             ax.axvline(x=focus_cont[optimal_focus],c='gray',linestyle='--', label=f'Optimal Focus: {focus_cont[optimal_focus]:.2f} [µm]')
