@@ -1043,12 +1043,10 @@ class RED:
             # Scatter plot with y_err of fwhm at each focus position
             ax.errorbar(focus_arr,x_fwhm_arr,yerr=x_fwhm_err,c='#4682B4',marker='.',linestyle='none')
             ax.errorbar(focus_arr,y_fwhm_arr,yerr=y_fwhm_err,c='salmon',marker='.',linestyle='none')
-            ax.errorbar(focus_arr,avg_fwhm_arr,yerr=avg_fwhm_err,c='mediumpurple',marker='.',linestyle='none')
             
             # Plots the fit hyperbolic models 
             ax.plot(focus_cont, x_focus, c='#4682B4', label='x fwhm')
             ax.plot(focus_cont, y_focus, c='salmon', label='y fwhm')
-            ax.plot(focus_cont, avg_focus, c='mediumpurple', label=r'avg fwhm $\sqrt{x^2+y^2}$')
             
             # Plots a vertical line at the location of optimal focus
             ax.axvline(x=focus_cont[optimal_focus],c='gray',linestyle='--', label=f'Optimal Focus: {focus_cont[optimal_focus]:.2f} [µm]')
