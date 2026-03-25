@@ -954,7 +954,7 @@ class RED:
         #       otherwise: reduce all fits images within the directory separately (no stacking)
         valid_subdirs = [subdir for subdir in self.subdirs if (os.path.isdir(f'{self.red_path}/{subdir}')) and not subdir.endswith('stacked_imgs')]
         if not len(valid_subdirs) == 0:
-            stack_path = f'{red_path}/stacked_imgs'
+            stack_path = f'{self.red_path}/stacked_imgs'
             if os.path.isdir(stack_path):
                 if subdirs is None:
                     subdirs = self.subdirs
