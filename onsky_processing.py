@@ -76,7 +76,7 @@ class RED:
         self.red_path = red_path
         
         # Defines name of raw data directory as global variable
-        self.raw_date = raw_path.strip().split('/')[-1]
+        self.raw_date = raw_path.name
         
         # Creates red directoryifit does not exist already
         if not os.path.isdir(f'{red_path}/'): os.mkdir(red_path)
