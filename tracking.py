@@ -420,8 +420,8 @@ def Process(data_root, save_path):
         
     return data_table
 
-
-Process(data_root, save_path)
+if __name__ == "__main__":
+    Process(data_root, save_path)
 
 
 
