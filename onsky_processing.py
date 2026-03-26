@@ -13,8 +13,8 @@ from datetime import datetime
 import warnings
 
 import numpy as np
-
 import matplotlib.pyplot as plt
+
 from matplotlib.patches import Ellipse
 from matplotlib.gridspec import GridSpec
 from matplotlib import colors, cm
@@ -28,14 +28,18 @@ from astropy.time import Time
 from astropy.table import Table, vstack
 from astropy.visualization import SqrtStretch
 from astropy.visualization.mpl_normalize import ImageNormalize
+from astropy.nddata import block_reduce
+from astropy.nddata.utils import Cutout2D
 
-from photutils.segmentation import SourceCatalog, detect_sources, detect_threshold, detect_sources, deblend_sources, make_2dgaussian_kernel
+from photutils.background import Background2D, MedianBackground
+from photutils.segmentation import SourceCatalog, detect_sources, detect_threshold, deblend_sources, make_2dgaussian_kernel
 from photutils.background import Background2D, MMMBackground, MedianBackground, MeanBackground, MADStdBackgroundRMS, SExtractorBackground, BkgZoomInterpolator
 from photutils.utils import circular_footprint, NoDetectionsWarning
 from photutils.psf import fit_2dgaussian
+from photutils.centroids import (centroid_1dg, centroid_2dg, centroid_com, centroid_quadratic, centroid_sources)
 
 from scipy.optimize import curve_fit, brentq
-
+from scipy.interpolate import UnivariateSpline
 
 
 class RED:
@@ -667,7 +671,7 @@ class RED:
         '''
         # defines source table from detect function
         self.load_fits(fits_file)
-        
+
         tbl = self.detect()
         
         # If more than 1 source is found runs avg_source to determine true center
@@ -676,7 +680,8 @@ class RED:
         else:
             center_est = (tbl['xcentroid'].value[0], tbl['ycentroid'].value[0])
         
-        # Fits gaussian
+        # Measures pupil through fwhm and compares to Gaussian
+        fwhm = get_fwhm(self.image)
         psf_characteristics = self.fit_2dgauss(center_est)
         
         # visualizes result of fit 
@@ -934,7 +939,7 @@ class RED:
     
     
     
-    def reduce_focus_sweep(self, focus_arr, subdirs=None, visualize=False, specific_suffix=None):
+    def reduce_focus_sweep(self, focus_arr, subdirs=None, visualize=False, specific_suffix=None, plot_multiple_sweeps=False):
         '''
         Function to determine optimal focus point based on minimizing fwhm from
         focus sweep data set. Reduces all files in raw_path to do so
@@ -944,9 +949,15 @@ class RED:
             subdirs: selected folders (eg timestamps) within the parent directory to be considered
             visualize: boolean; determines if plot of focus sweep data should be created
             specific_suffix: string of the filesuffix that should be considered, eg ".zwo.fits"
+            plot_multiple_sweeps: boolean; when True, returns fwhm_arr
+                instead of optimal_focus (per-image cross-section plots are
+                still saved regardless).
         
         Returns:
-            optimal_focus: float [µm]; the optimal focus location to minimize source fwhm in x and y
+            If plot_multiple_sweeps is True (new spline method):
+                fwhm_arr: ndarray; measured FWHM at each focus position
+            Otherwise (old 2D Gaussian method):
+                optimal_focus: float [µm]; the optimal focus location to minimize source fwhm
         
         '''
         
@@ -989,77 +1000,97 @@ class RED:
                 # Defines global variable fits_imgs to be the stacked fits  for reduction
                 self.fits_imgs = self.stacked_fits
         
-        # Reduces each fits file in fits_imgs global variable
-        for fits_img in self.fits_imgs:
-            self.focus_reduce_one(fits_img)
-        
-        self.psf_data_tbl.add_column(focus_arr,name='Focus Position')
-        
-        # Saves psf characteristic table for all reduced images to a txt
-        self.psf_data_tbl.write(f'{self.red_path}/{self.raw_date}_focus_data.txt', format='ascii.fixed_width', overwrite=True)
-        
-        # 3-parameter hyperbola: f0 = min FWHM at best focus, s = defocus slope, h = best focus position
-        # f(x) = sqrt(f0^2 + s^2 * (x - h)^2)
-        focus_hyperbola = lambda x, h, f0, s: np.sqrt(f0**2 + s**2 * (x - h)**2)
-        
-        # Pulls columns for psf fwhm from global data table
-        x_fwhm_arr = self.psf_data_tbl['FWHM_x']
-        y_fwhm_arr = self.psf_data_tbl['FWHM_y']
-        
-        # Pulls colums for psf fwhm error from global data table
-        x_fwhm_err = self.psf_data_tbl['FWHM_x_err']
-        y_fwhm_err = self.psf_data_tbl['FWHM_y_err']
+        #New method: use 1D spline fitting for FWHM
+        if True:
+            fwhm_holder = []
+            n_imgs = len(self.fits_imgs)
+            for idx, fits_img in enumerate(self.fits_imgs):
+                self.load_fits(fits_img)
+                fwhm = get_fwhm(self.image, plot_output=True, index=idx, total=n_imgs)
+                fwhm_holder.append(fwhm)
+            fwhm_arr = np.array(fwhm_holder, dtype=float)
+            fwhm_arr[fwhm_arr == 0] = np.max(fwhm_arr)
+            plt.title(f'PSF FWHM during {int(np.mean(np.diff(focus_arr)))}um piston (defocus) movements')
+            plt.xlabel('1D sum (pixels)')
+            plt.savefig(f'{self.red_path}/cross_section_fwhm.jpg')
+            plt.close()
+            return fwhm_arr
+                
 
-        # Average FWHM magnitude and its propagated error
-        avg_fwhm_arr = np.sqrt(x_fwhm_arr**2 + y_fwhm_arr**2)
-        avg_fwhm_err = np.sqrt((x_fwhm_arr * x_fwhm_err)**2 + (y_fwhm_arr * y_fwhm_err)**2) / avg_fwhm_arr
-        
-        # Fits hyperbola to the x and y fwhm as they change over focus sweep
-        # Initial guesses from data: h=focus at min FWHM, f0=min FWHM, s=slope estimate
-        focus_range = focus_arr[-1] - focus_arr[0]
-        x_p0 = [focus_arr[np.argmin(x_fwhm_arr)], np.min(x_fwhm_arr), np.ptp(x_fwhm_arr) / (focus_range / 2)]
-        y_p0 = [focus_arr[np.argmin(y_fwhm_arr)], np.min(y_fwhm_arr), np.ptp(y_fwhm_arr) / (focus_range / 2)]
-        avg_p0 = [focus_arr[np.argmin(avg_fwhm_arr)], np.min(avg_fwhm_arr), np.ptp(avg_fwhm_arr) / (focus_range / 2)]
-        fit_bounds = ([focus_arr.min(), 0.1, 0], [focus_arr.max(), np.inf, np.inf])
-        xpopt, xpcov = curve_fit(focus_hyperbola, focus_arr, x_fwhm_arr, p0=x_p0, bounds=fit_bounds, sigma=x_fwhm_err, absolute_sigma=True)
-        ypopt, ypcov = curve_fit(focus_hyperbola, focus_arr, y_fwhm_arr, p0=y_p0, bounds=fit_bounds, sigma=y_fwhm_err, absolute_sigma=True)
-        avgpopt, avgpcov = curve_fit(focus_hyperbola, focus_arr, avg_fwhm_arr, p0=avg_p0, bounds=fit_bounds, sigma=avg_fwhm_err, absolute_sigma=True)
-        
-        # Defines continuum for proper graphing of fit models
-        focus_cont = np.linspace(np.min(focus_arr),np.max(focus_arr),1000)
+        #Old method: fit to 2D Gaussian
+        else:
+            # Reduces each fits file in fits_imgs global variable
+            for fits_img in self.fits_imgs:
+                self.focus_reduce_one(fits_img)
+            
+            self.psf_data_tbl.add_column(focus_arr,name='Focus Position')
+            
+            # Saves psf characteristic table for all reduced images to a txt
+            self.psf_data_tbl.write(f'{self.red_path}/{self.raw_date}_focus_data.txt', format='ascii.fixed_width', overwrite=True)
+            
+            
+            # Pulls columns for psf fwhm from global data table
+            x_fwhm_arr = self.psf_data_tbl['FWHM_x']
+            y_fwhm_arr = self.psf_data_tbl['FWHM_y']
+            
+            # Pulls colums for psf fwhm error from global data table
+            x_fwhm_err = self.psf_data_tbl['FWHM_x_err']
+            y_fwhm_err = self.psf_data_tbl['FWHM_y_err']
 
-        # Creates models for x_FWHM(focus_pos), y_FWHM(focus_pos), and avg_FWHM(focus_pos)
-        x_focus = focus_hyperbola(focus_cont, *xpopt)
-        y_focus = focus_hyperbola(focus_cont, *ypopt)
-        avg_focus = focus_hyperbola(focus_cont, *avgpopt)
+            # Average FWHM magnitude and its propagated error
+            avg_fwhm_arr = np.sqrt(x_fwhm_arr**2 + y_fwhm_arr**2)
+            avg_fwhm_err = np.sqrt((x_fwhm_arr * x_fwhm_err)**2 + (y_fwhm_arr * y_fwhm_err)**2) / avg_fwhm_arr
+            x_p0 = [focus_arr[np.argmin(x_fwhm_arr)], np.min(x_fwhm_arr), np.ptp(x_fwhm_arr) / (focus_range / 2)]
+            y_p0 = [focus_arr[np.argmin(y_fwhm_arr)], np.min(y_fwhm_arr), np.ptp(y_fwhm_arr) / (focus_range / 2)]
+            avg_p0 = [focus_arr[np.argmin(avg_fwhm_arr)], np.min(avg_fwhm_arr), np.ptp(avg_fwhm_arr) / (focus_range / 2)]
+            fit_bounds = ([focus_arr.min(), 0.1, 0], [focus_arr.max(), np.inf, np.inf])       
+        
+            # 3-parameter hyperbola: f0 = min FWHM at best focus, s = defocus slope, h = best focus position
+            # f(x) = sqrt(f0^2 + s^2 * (x - h)^2)
+            focus_hyperbola = lambda x, h, f0, s: np.sqrt(f0**2 + s**2 * (x - h)**2)
 
-        # Finds index of the minimum in the avg FWHM fit as the optimal focus position
-        optimal_focus = np.argmin(avg_focus)
-        
-        if visualize == True:
-            # Creates a plot to display focus sweep data
-            fig, ax = plt.subplots(layout='constrained')
+            # Fits hyperbola to the x and y fwhm as they change over focus sweep
+            # Initial guesses from data: h=focus at min FWHM, f0=min FWHM, s=slope estimate
+            focus_range = focus_arr[-1] - focus_arr[0]
+            xpopt, xpcov = curve_fit(focus_hyperbola, focus_arr, x_fwhm_arr, p0=x_p0, bounds=fit_bounds, sigma=x_fwhm_err, absolute_sigma=True)
+            ypopt, ypcov = curve_fit(focus_hyperbola, focus_arr, y_fwhm_arr, p0=y_p0, bounds=fit_bounds, sigma=y_fwhm_err, absolute_sigma=True)
+            avgpopt, avgpcov = curve_fit(focus_hyperbola, focus_arr, avg_fwhm_arr, p0=avg_p0, bounds=fit_bounds, sigma=avg_fwhm_err, absolute_sigma=True)
             
-            # Scatter plot with y_err of fwhm at each focus position
-            ax.errorbar(focus_arr,x_fwhm_arr,yerr=x_fwhm_err,c='#4682B4',marker='.',linestyle='none')
-            ax.errorbar(focus_arr,y_fwhm_arr,yerr=y_fwhm_err,c='salmon',marker='.',linestyle='none')
+            # Defines continuum for proper graphing of fit models
+            focus_cont = np.linspace(np.min(focus_arr),np.max(focus_arr),1000)
+
+            # Creates models for x_FWHM(focus_pos), y_FWHM(focus_pos), and avg_FWHM(focus_pos)
+            x_focus = focus_hyperbola(focus_cont, *xpopt)
+            y_focus = focus_hyperbola(focus_cont, *ypopt)
+            avg_focus = focus_hyperbola(focus_cont, *avgpopt)
+
+            # Finds index of the minimum in the avg FWHM fit as the optimal focus position
+            optimal_focus = np.argmin(avg_focus)
             
-            # Plots the fit hyperbolic models 
-            ax.plot(focus_cont, x_focus, c='#4682B4', label='x fwhm')
-            ax.plot(focus_cont, y_focus, c='salmon', label='y fwhm')
+            if visualize == True:
+                # Creates a plot to display focus sweep data
+                fig, ax = plt.subplots(layout='constrained')
+                
+                # Scatter plot with y_err of fwhm at each focus position
+                ax.errorbar(focus_arr,x_fwhm_arr,yerr=x_fwhm_err,c='#4682B4',marker='.',linestyle='none')
+                ax.errorbar(focus_arr,y_fwhm_arr,yerr=y_fwhm_err,c='salmon',marker='.',linestyle='none')
+                
+                # Plots the fit hyperbolic models 
+                ax.plot(focus_cont, x_focus, c='#4682B4', label='x fwhm')
+                ax.plot(focus_cont, y_focus, c='salmon', label='y fwhm')
+                
+                # Plots a vertical line at the location of optimal focus
+                ax.axvline(x=focus_cont[optimal_focus],c='gray',linestyle='--', label=f'Optimal Focus: {focus_cont[optimal_focus]:.2f} [µm]')
+                
+                # Plot Formatting
+                ax.set_title('Focus Sweep: 20250521') # Need to come back and make more modular
+                ax.set_xlabel('Focus Position [µm]') # Displays optimal focus found
+                ax.set_ylabel('FWHM [pixels]')
+                ax.legend()
+                
+                plt.show()
             
-            # Plots a vertical line at the location of optimal focus
-            ax.axvline(x=focus_cont[optimal_focus],c='gray',linestyle='--', label=f'Optimal Focus: {focus_cont[optimal_focus]:.2f} [µm]')
-            
-            # Plot Formatting
-            ax.set_title('Focus Sweep: 20250521') # Need to come back and make more modular
-            ax.set_xlabel('Focus Position [µm]') # Displays optimal focus found
-            ax.set_ylabel('FWHM [pixels]')
-            ax.legend()
-            
-            plt.show()
-        
-        return focus_cont[optimal_focus]
+            return focus_cont[optimal_focus]
     
     def reduce_tracking(self, subdirs=None, visualize=False, verbose=False):
         
@@ -1304,6 +1335,68 @@ class RED:
 
 
         return drift_resultls
+    
+def get_fwhm(data=None, plot_output=False, index=None, total=None):
+    """Measure the FWHM of the brightest source in the image via spline fitting.
+
+    Parameters
+    ----------
+    data : 2d ndarray
+        Image data.
+    plot_output : bool
+        If True, plot the spline profile.
+    index : int or None
+        Zero-based index of this frame within the sweep.  Used together
+        with *total* to assign a colour from the *viridis* colormap.
+    total : int or None
+        Total number of frames in the sweep.  When both *index* and
+        *total* are provided the plotted line colour is sampled from
+        viridis at ``index / max(total - 1, 1)``.
+    """
+    if not type(data) == None :
+        #downsample data to speed up process.
+        datared = block_reduce(data.astype(np.float32), 2)
+
+        if ( True ):
+            bkg_estimator = MedianBackground()
+            bkg = Background2D(datared, (50,50), filter_size=(3,3), bkg_estimator=bkg_estimator)
+            img = datared - bkg.background # subtract the background
+
+            # find peak value near the center and use that as the fidicial for focus measurment
+            max_index_flat = np.argmax(img)
+            max_index_2d = np.unravel_index(max_index_flat, img.shape)
+            print(f'ymax, xmax = {max_index_2d}')
+            ymax,xmax = max_index_2d   
+
+            # get_subregion around that location
+            box_size = 65
+            #sub_img = get_subarray(img, xmax, ymax, box_size)
+            # recenter image  
+            x1, y1 = centroid_sources(img, xmax, ymax, box_size, centroid_func=centroid_com)
+            print(f'x1 = {x1}, y1 = {y1}')
+            #sub_img = get_subarray(img, x1, y1, box_size)
+            sub_img = Cutout2D(img, (x1, y1), (box_size, box_size))
+            height, width = sub_img.data.shape
+            bytes_per_line = width
+            # plot the X-profile through the center
+            xcut = np.mean(sub_img.data, axis=0)
+
+            half_max = 0.5*(np.max(xcut) - np.min(xcut)) + np.min(xcut)
+            x = np.linspace(0, len(xcut)-1, len(xcut))
+            spline = UnivariateSpline(x, xcut - half_max)
+            print(f'roots: {spline.roots()}')
+            
+            r1, r2 = np.min(spline.roots()), np.max(spline.roots())
+            fwhm = r2-r1
+
+            if plot_output:
+                label = f'{fwhm:.2f}'
+                color = plt.cm.cool(index / max(total - 1, 1)) if index is not None and total is not None else None
+                plt.plot(x, spline(x), label=label, color=color)            
+                plt.legend()
+
+    return fwhm
+ 
     
 #%%
 
